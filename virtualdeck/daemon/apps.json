@@ -1,0 +1,18 @@
+[
+  {
+    "id": "spotify",
+    "name": "Spotify",
+    "exe": "C:\\Users\\Ian\\AppData\\Roaming\\Spotify\\Spotify.exe",
+    "args": [],
+    "icon": "/icons/spotify.png",
+    "defaultLayout": "fullscreen"
+  },
+  {
+    "id": "chrome",
+    "name": "Chrome",
+    "exe": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "args": ["--new-window"],
+    "icon": "/icons/chrome.png",
+    "defaultLayout": "fullscreen"
+  }
+]
