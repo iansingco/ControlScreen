@@ -16,15 +16,21 @@ Turn a tablet into a dedicated second workspace for your Windows PC — without 
   │     ├── Manages app launching + window placement on virtual display
   │     ├── Captures virtual display via node-screenshots (Windows Graphics Capture API)
   │     ├── Streams it to tablet via WebRTC (LAN only)
-  │     └── Receives touch/input events from tablet via WebSocket → injects via nut-js
+  │     ├── Receives touch/input events from tablet via WebSocket → injects via nut-js
+  │     └── Widget layer: polls system data, broadcasts over /widget-data WebSocket
   └── Audio output stays on PC's default audio device (untouched)
 
-[Tablet]
+[Tablet / phone / secondary display]
   └── Browser (kiosk mode) running VirtualDeck Shell (React PWA)
-        ├── Shell/launcher UI (home screen, app grid)
-        ├── WebRTC video feed of virtual display (when an app is open)
-        └── Touch input forwarded back to PC daemon via WebSocket
+        ├── Shell/launcher UI (home screen, app grid)          → http://<PC>:4321/
+        ├── WebRTC video feed of virtual display (app session) → in-app navigation
+        ├── Touch input forwarded back to PC daemon via WebSocket
+        └── Widget canvas (always-on, no streaming overhead)   → http://<PC>:4321/canvas
 ```
+
+The **widget canvas** is a separate surface from the app launcher. Any device on the LAN — phone, tablet, secondary monitor — can point a browser at `/canvas` and get a live widget panel driven entirely by the daemon. No streaming, no latency, just HTML.
+
+Inspired by the Corsair Xeneon Edge model (iCUE serves HTML widgets to a dumb display). Here the daemon is iCUE and any networked browser is the display.
 
 ---
 
@@ -39,25 +45,35 @@ virtualdeck/
 │   │   ├── webrtc.ts        # WebRTC peer + signaling
 │   │   ├── input.ts         # Touch/key injection via nut-js
 │   │   ├── launcher.ts      # App launching + window placement
+│   │   ├── widgetServer.ts  # Widget data polling + broadcast
 │   │   ├── windowManager.ts # Win32 SetWindowPos / monitor discovery
 │   │   └── win32.ts         # Win32 EnumWindows / HWND helpers
 │   ├── apps.json            # Registered app definitions
+│   ├── widgets.json         # Widget layout config
 │   ├── package.json
 │   └── tsconfig.json
 │
-├── shell/                   # Tablet-side React PWA
+├── shell/                   # React PWA (launcher + widget canvas)
 │   ├── src/
-│   │   ├── App.tsx
+│   │   ├── App.tsx          # Pathname router: / → launcher, /canvas → widgets
 │   │   ├── views/
 │   │   │   ├── Home.tsx     # App launcher grid
-│   │   │   └── Session.tsx  # Active app: WebRTC feed + touch overlay
+│   │   │   ├── Session.tsx  # Active app: WebRTC feed + touch overlay
+│   │   │   └── Canvas.tsx   # Fullscreen widget canvas
 │   │   ├── components/
 │   │   │   ├── AppTile.tsx
 │   │   │   ├── VideoFeed.tsx
-│   │   │   └── TouchOverlay.tsx
+│   │   │   ├── TouchOverlay.tsx
+│   │   │   ├── WidgetGrid.tsx   # CSS Grid layout engine
+│   │   │   └── widgets/
+│   │   │       ├── index.ts     # Widget registry (component name → React component)
+│   │   │       ├── Clock.tsx
+│   │   │       ├── SystemStats.tsx
+│   │   │       └── NowPlaying.tsx
 │   │   └── hooks/
 │   │       ├── useWebRTC.ts
-│   │       └── useInputBridge.ts
+│   │       ├── useInputBridge.ts
+│   │       └── useWidgetData.ts # WebSocket context + per-channel hook
 │   ├── package.json
 │   └── vite.config.ts
 │
@@ -108,8 +124,10 @@ POST /apps/:id/launch   → launch app onto virtual display
 POST /apps/:id/close    → close app
 GET  /stream/offer      → WebRTC SDP offer
 POST /stream/answer     → WebRTC SDP answer
+GET  /widget-config     → widget layout config (widgets.json)
 WS   /input             → touch/key event stream (tablet → daemon)
 WS   /events            → app state updates (daemon → tablet)
+WS   /widget-data       → live widget data push (daemon → canvas clients)
 ```
 
 ### Touch event format (`/input` WebSocket)
@@ -170,9 +188,56 @@ Place app icons in `shell/public/icons/` so they're served at `/icons/<name>.png
 | Streaming | WebRTC (`@roamhq/wrtc` on daemon, browser-native on tablet) |
 | Input injection | `nut-js` (wraps Win32 SendInput) |
 | Window management | `ffi-napi` → Win32 SetWindowPos / EnumWindows |
+| Widget data | `systeminformation` (CPU, RAM); extensible via WidgetServer |
 | Shell framework | React 18 + Vite (PWA via `vite-plugin-pwa`) |
 | Shell styling | Tailwind CSS |
 | Transport | WebSocket (`ws` package) |
+
+---
+
+## Widget Canvas
+
+Navigate any device to `http://<PC-IP>:4321/canvas` for an always-on, zero-latency widget panel. No streaming involved — the daemon pushes live data directly to the browser over WebSocket.
+
+### Included widgets
+
+| Component | Channel | Data |
+|---|---|---|
+| `Clock` | `clock` | Current time, day, date (1s updates) |
+| `SystemStats` | `system` | CPU load %, RAM used/total (2s updates) |
+| `NowPlaying` | `nowPlaying` | Track title, artist, play state (3s updates, stub) |
+
+### Adding a widget
+
+1. Create `shell/src/components/widgets/MyWidget.tsx` — a React component that calls `useWidgetChannel<MyData>('myChannel')`.
+2. Add `MyWidget` to the registry in `shell/src/components/widgets/index.ts`.
+3. In `daemon/src/widgetServer.ts`, add a `setInterval` that broadcasts on `'myChannel'`.
+4. Add an entry to `daemon/widgets.json` with your chosen `component`, `size`, `col`, and `row`.
+
+### widgets.json layout
+
+```json
+{
+  "columns": 4,
+  "rows": 3,
+  "gap": 16,
+  "widgets": [
+    { "id": "clock",        "component": "Clock",       "size": "small",  "col": 1, "row": 1 },
+    { "id": "system-stats", "component": "SystemStats", "size": "large",  "col": 2, "row": 1 },
+    { "id": "now-playing",  "component": "NowPlaying",  "size": "medium", "col": 1, "row": 2 }
+  ]
+}
+```
+
+**Size slots:** `small` = 1×1, `medium` = 2×1, `large` = 2×2 (in grid column/row units).
+
+### Wiring up NowPlaying
+
+The `NowPlaying` widget broadcasts a stub (nothing playing) until you connect a real source. Options:
+
+- **Spotify Web API** — poll `/me/player` with an OAuth token stored in the daemon config.
+- **Windows SMTC** — Windows System Media Transport Controls via a native N-API addon gives system-wide now-playing data (works with Spotify, browsers, etc.).
+- **Manual push** — POST to a new `/now-playing` REST endpoint and call `widgetServer.setNowPlaying(...)`.
 
 ---
 

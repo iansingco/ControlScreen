@@ -34,8 +34,10 @@ export default defineConfig({
     proxy: {
       '/apps': 'http://localhost:4321',
       '/stream': 'http://localhost:4321',
+      '/widget-config': 'http://localhost:4321',
       '/input': { target: 'ws://localhost:4321', ws: true },
       '/events': { target: 'ws://localhost:4321', ws: true },
+      '/widget-data': { target: 'ws://localhost:4321', ws: true },
     },
   },
 });

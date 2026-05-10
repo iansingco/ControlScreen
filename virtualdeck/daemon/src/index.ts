@@ -3,11 +3,13 @@ import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
 import path from 'path';
+import { readFileSync } from 'fs';
 import { CaptureService } from './capture';
 import { WebRTCService } from './webrtc';
 import { InputService } from './input';
 import { LauncherService } from './launcher';
 import { WindowManager } from './windowManager';
+import { WidgetServer } from './widgetServer';
 
 const PORT = 4321;
 
@@ -23,6 +25,7 @@ const httpServer = createServer(app);
 // WebSocket servers
 const inputWss = new WebSocketServer({ noServer: true });
 const eventsWss = new WebSocketServer({ noServer: true });
+const widgetWss = new WebSocketServer({ noServer: true });
 
 // Services
 const windowManager = new WindowManager();
@@ -30,6 +33,7 @@ const captureService = new CaptureService();
 const webrtcService = new WebRTCService(captureService);
 const inputService = new InputService(windowManager);
 const launcher = new LauncherService(windowManager);
+const widgetServer = new WidgetServer();
 
 // Broadcast app state to all event subscribers
 function broadcast(event: object) {
@@ -72,6 +76,21 @@ app.post('/apps/:id/close', async (req, res) => {
   }
 });
 
+// Widget config
+const WIDGETS_PATH = path.join(__dirname, '../../widgets.json');
+app.get('/widget-config', (_req, res) => {
+  try {
+    res.json(JSON.parse(readFileSync(WIDGETS_PATH, 'utf-8')));
+  } catch {
+    res.status(500).json({ error: 'Could not read widgets.json' });
+  }
+});
+
+// SPA fallback — /canvas and any unknown paths serve index.html so client-side routing works
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(__dirname, '../../shell/dist/index.html'));
+});
+
 // WebRTC signaling
 app.get('/stream/offer', async (_req, res) => {
   try {
@@ -104,6 +123,10 @@ httpServer.on('upgrade', (request, socket, head) => {
     eventsWss.handleUpgrade(request, socket, head, (ws) => {
       eventsWss.emit('connection', ws, request);
     });
+  } else if (pathname === '/widget-data') {
+    widgetWss.handleUpgrade(request, socket, head, (ws) => {
+      widgetWss.emit('connection', ws, request);
+    });
   } else {
     socket.destroy();
   }
@@ -128,12 +151,20 @@ eventsWss.on('connection', (_ws) => {
   console.log('[events] subscriber connected');
 });
 
+// Widget data channel — register each new client with the WidgetServer
+widgetWss.on('connection', (ws) => {
+  console.log('[widgets] canvas client connected');
+  widgetServer.addClient(ws);
+});
+
 async function main() {
   await captureService.init();
   await inputService.init();
+  widgetServer.start();
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`VirtualDeck daemon running on http://0.0.0.0:${PORT}`);
+    console.log(`  Widget canvas: http://0.0.0.0:${PORT}/canvas`);
   });
 }
 
